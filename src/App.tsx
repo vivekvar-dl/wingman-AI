@@ -47,6 +47,10 @@ declare global {
 
       moveWindowLeft: () => Promise<void>
       moveWindowRight: () => Promise<void>
+      transcribeAudio: (wavBase64: string) => Promise<{ text: string }>
+      startSystemAudio: () => Promise<boolean>
+      stopSystemAudio: () => Promise<void>
+      onSystemAudio: (callback: (pcm: Uint8Array) => void) => () => void
       quitApp: () => Promise<void>
     }
   }

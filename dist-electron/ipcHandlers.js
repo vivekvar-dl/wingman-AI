@@ -1,8 +1,13 @@
 "use strict";
 // ipcHandlers.ts
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeIpcHandlers = initializeIpcHandlers;
 const electron_1 = require("electron");
+const child_process_1 = require("child_process");
+const path_1 = __importDefault(require("path"));
 function initializeIpcHandlers(appState) {
     electron_1.ipcMain.handle("update-content-dimensions", async (event, { width, height }) => {
         if (width && height) {
@@ -116,6 +121,45 @@ function initializeIpcHandlers(appState) {
             throw error;
         }
     });
+    electron_1.ipcMain.handle("transcribe-audio", (event, wavBase64) => appState.processingHelper.getLLMHelper().transcribeAudio(wavBase64));
+    // System audio (the other side of the call) via audiotee: a Core Audio process tap, macOS 14.2+.
+    // Streams 16kHz mono s16le PCM on stdout; we relay it to the renderer for VAD.
+    let audiotee = null;
+    electron_1.ipcMain.handle("system-audio-start", (event) => {
+        if (process.platform !== "darwin" || audiotee)
+            return false;
+        const bin = path_1.default
+            .join(electron_1.app.getAppPath(), "node_modules/audiotee/bin/audiotee")
+            .replace("app.asar", "app.asar.unpacked");
+        const proc = (0, child_process_1.spawn)(bin, ["--sample-rate", "16000", "--chunk-duration", "0.05"]);
+        audiotee = proc;
+        let carry = Buffer.alloc(0); // a pipe read can split a 2-byte sample
+        proc.stdout.on("data", (data) => {
+            const buf = Buffer.concat([carry, data]);
+            const even = buf.length & ~1;
+            carry = buf.subarray(even);
+            if (!event.sender.isDestroyed())
+                event.sender.send("system-audio-data", buf.subarray(0, even));
+        });
+        proc.stderr.on("data", (data) => {
+            if (data.includes('"error"'))
+                console.error("[audiotee]", data.toString().trim());
+        });
+        proc.on("error", (error) => console.error("[audiotee] failed to start:", error));
+        proc.on("exit", () => {
+            if (audiotee === proc)
+                audiotee = null;
+        });
+        return true;
+    });
+    electron_1.ipcMain.handle("system-audio-stop", () => {
+        const proc = audiotee;
+        audiotee = null;
+        proc?.kill();
+        // audiotee can ignore SIGTERM; never leave it capturing in the background
+        setTimeout(() => proc?.kill("SIGKILL"), 2000);
+    });
+    electron_1.app.on("will-quit", () => audiotee?.kill("SIGKILL"));
     electron_1.ipcMain.handle("quit-app", () => {
         electron_1.app.quit();
     });

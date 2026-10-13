@@ -1,3 +1,27 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Cluely-style surfaces: dark glass bar, grey/blue gradient buttons */
+@layer components {
+  .cl-glass {
+    background: hsla(252, 10%, 10%, 0.92);
+    box-shadow: 0 0 0 1px rgba(207, 226, 255, 0.24), 0 -0.5px 0 0 rgba(255, 255, 255, 0.8),
+      0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+  .cl-grey {
+    background: linear-gradient(#2e3039, #272a31);
+    box-shadow: 0 21px 21px #00000021, 0 5px 12px #00000029, inset 0 -1px #16171a, inset 0 0.5px #afb3c4;
+  }
+  .cl-blue {
+    background: linear-gradient(#0544a9, #022c70);
+    box-shadow: 0 0 0 0.5px #0c44a1, 0 5px 12px #00000029, inset 0 -1px #022c70, inset 0 0.5px #81b6ff;
+  }
+  .cl-hover {
+    transition: transform 150ms, filter 150ms;
+  }
+  .cl-hover:hover:not(:disabled) {
+    transform: scale(1.05);
+    filter: brightness(1.25);
+  }
+}

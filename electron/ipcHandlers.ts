@@ -1,6 +1,8 @@
 // ipcHandlers.ts
 
 import { ipcMain, app } from "electron"
+import { spawn, ChildProcess } from "child_process"
+import path from "path"
 import { AppState } from "./main"
 
 export function initializeIpcHandlers(appState: AppState): void {
@@ -124,6 +126,45 @@ export function initializeIpcHandlers(appState: AppState): void {
       throw error
     }
   })
+
+  ipcMain.handle("transcribe-audio", (event, wavBase64: string) =>
+    appState.processingHelper.getLLMHelper().transcribeAudio(wavBase64)
+  )
+
+  // System audio (the other side of the call) via audiotee: a Core Audio process tap, macOS 14.2+.
+  // Streams 16kHz mono s16le PCM on stdout; we relay it to the renderer for VAD.
+  let audiotee: ChildProcess | null = null
+  ipcMain.handle("system-audio-start", (event) => {
+    if (process.platform !== "darwin" || audiotee) return false
+    const bin = path
+      .join(app.getAppPath(), "node_modules/audiotee/bin/audiotee")
+      .replace("app.asar", "app.asar.unpacked")
+    const proc = spawn(bin, ["--sample-rate", "16000", "--chunk-duration", "0.05"])
+    audiotee = proc
+    let carry = Buffer.alloc(0) // a pipe read can split a 2-byte sample
+    proc.stdout.on("data", (data: Buffer) => {
+      const buf = Buffer.concat([carry, data])
+      const even = buf.length & ~1
+      carry = buf.subarray(even)
+      if (!event.sender.isDestroyed()) event.sender.send("system-audio-data", buf.subarray(0, even))
+    })
+    proc.stderr.on("data", (data: Buffer) => {
+      if (data.includes('"error"')) console.error("[audiotee]", data.toString().trim())
+    })
+    proc.on("error", (error) => console.error("[audiotee] failed to start:", error))
+    proc.on("exit", () => {
+      if (audiotee === proc) audiotee = null
+    })
+    return true
+  })
+  ipcMain.handle("system-audio-stop", () => {
+    const proc = audiotee
+    audiotee = null
+    proc?.kill()
+    // audiotee can ignore SIGTERM; never leave it capturing in the background
+    setTimeout(() => proc?.kill("SIGKILL"), 2000)
+  })
+  app.on("will-quit", () => audiotee?.kill("SIGKILL"))
 
   ipcMain.handle("quit-app", () => {
     app.quit()

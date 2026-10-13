@@ -24,6 +24,10 @@ export interface ElectronAPI {
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   analyzeTextQuestion: (question: string, isSmartMode?: boolean) => Promise<{ text: string; timestamp: number }>
   analyzeScreenWithQuestion: (imagePath: string, question: string, isSmartMode?: boolean) => Promise<{ text: string; timestamp: number }>
+  transcribeAudio: (wavBase64: string) => Promise<{ text: string }>
+  startSystemAudio: () => Promise<boolean>
+  stopSystemAudio: () => Promise<void>
+  onSystemAudio: (callback: (pcm: Uint8Array) => void) => () => void
   quitApp: () => Promise<void>
 }
 

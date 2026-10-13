@@ -20,6 +20,9 @@
       "dist-electron/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "node_modules/audiotee/bin/**"
+    ],
     "directories": {
       "output": "release"
     },
@@ -29,7 +32,11 @@
         "dmg",
         "zip"
       ],
-      "icon": "assets/icons/mac/icon.icns"
+      "icon": "assets/icons/mac/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Wingman transcribes your side of the conversation.",
+        "NSAudioCaptureUsageDescription": "Wingman transcribes the other side of your call."
+      }
     },
     "win": {
       "target": [
@@ -58,6 +65,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@ricky0123/vad-web": "^0.0.29",
     "@types/color": "^4.2.0",
     "@types/diff": "^6.0.0",
     "@types/electron": "^1.4.38",
@@ -91,6 +99,7 @@
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-toast": "^1.2.2",
     "@sentry/electron": "^6.8.0",
+    "audiotee": "^0.0.7",
     "axios": "^1.7.7",
     "axios-retry": "^4.5.0",
     "class-variance-authority": "^0.7.0",

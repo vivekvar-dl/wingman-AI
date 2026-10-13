@@ -113,6 +113,16 @@ electron_1.contextBridge.exposeInMainWorld("electronAPI", {
     analyzeImageFile: (path) => electron_1.ipcRenderer.invoke("analyze-image-file", path),
     analyzeTextQuestion: (question, isSmartMode = true) => electron_1.ipcRenderer.invoke("analyze-text-question", question, isSmartMode),
     analyzeScreenWithQuestion: (imagePath, question, isSmartMode = true) => electron_1.ipcRenderer.invoke("analyze-screen-with-question", imagePath, question, isSmartMode),
+    transcribeAudio: (wavBase64) => electron_1.ipcRenderer.invoke("transcribe-audio", wavBase64),
+    startSystemAudio: () => electron_1.ipcRenderer.invoke("system-audio-start"),
+    stopSystemAudio: () => electron_1.ipcRenderer.invoke("system-audio-stop"),
+    onSystemAudio: (callback) => {
+        const subscription = (_, pcm) => callback(pcm);
+        electron_1.ipcRenderer.on("system-audio-data", subscription);
+        return () => {
+            electron_1.ipcRenderer.removeListener("system-audio-data", subscription);
+        };
+    },
     quitApp: () => electron_1.ipcRenderer.invoke("quit-app")
 });
 //# sourceMappingURL=preload.js.map

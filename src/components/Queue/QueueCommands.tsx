@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react"
-import { IoInformationCircleOutline, IoLogOutOutline, IoSend, IoClose } from "react-icons/io5"
+import { IoPlay, IoStop, IoChevronUp, IoChevronDown, IoArrowUp, IoClose, IoLogOutOutline } from "react-icons/io5"
 import { Markdown } from "../ui/markdown"
+import { startLiveAudio, type Role } from "../../lib/liveAudio"
 
 interface QueueCommandsProps {
   onTooltipVisibilityChange?: (visible: boolean, height: number) => void
@@ -41,21 +42,18 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
 
   // Live insights state
   const [liveInsights, setLiveInsights] = useState<LiveInsight[]>([])
-  const [showLiveInsights, setShowLiveInsights] = useState(false)
   const [currentTranscription, setCurrentTranscription] = useState("")
-  const [selectedInsight, setSelectedInsight] = useState<LiveInsight | null>(null)
-  const [insightAnswer, setInsightAnswer] = useState("")
   
   // Recording state
   const [isPaused, setIsPaused] = useState(false)
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null)
 
-  // Fast real-time transcription using Web Speech API
-  const [speechRecognition, setSpeechRecognition] = useState<any>(null)
+  // Live transcription: mic + system audio → on-device VAD → one transcription per utterance
   const [isListening, setIsListening] = useState(false)
-  const [interimTranscript, setInterimTranscript] = useState("")
-  const [finalTranscript, setFinalTranscript] = useState("")
-  const [lastQuestionTime, setLastQuestionTime] = useState(0)
+  const [transcript, setTranscript] = useState<Array<{ id: number; role: Role; text?: string }>>([])
+  const stopAudioRef = useRef<(() => Promise<void>) | null>(null)
+  const nextLineId = useRef(0)
+  const lastQuestionTime = useRef(0)
 
   useEffect(() => {
     let tooltipHeight = 0
@@ -71,65 +69,8 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     }
   }, [showAskInterface])
 
-  useEffect(() => {
-    // Initialize Web Speech API for fast real-time transcription
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-      const recognition = new SpeechRecognition()
-      
-      recognition.continuous = true
-      recognition.interimResults = true
-      recognition.lang = 'en-US'
-      
-      recognition.onstart = () => {
-        setIsListening(true)
-        setInterimTranscript("")
-        setFinalTranscript("")
-      }
-      
-      recognition.onresult = (event: any) => {
-        let interim = ""
-        let final = ""
-        
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript
-          if (event.results[i].isFinal) {
-            final += transcript + " "
-            
-            // Fast question detection on final results
-            const questions = detectQuestions(transcript)
-            if (questions.length > 0) {
-              const now = Date.now()
-              if (now - lastQuestionTime > 2000) { // Prevent spam
-                setLastQuestionTime(now)
-                questions.forEach(question => addLiveInsight(question))
-                
-                // Instant AI response to the question
-                handleInstantResponse(question)
-              }
-            }
-          } else {
-            interim += transcript
-          }
-        }
-        
-        setInterimTranscript(interim)
-        setFinalTranscript(prev => prev + final)
-        setCurrentTranscription(prev => prev + final)
-      }
-      
-      recognition.onerror = (event: any) => {
-        console.error('Speech recognition error:', event.error)
-        setIsListening(false)
-      }
-      
-      recognition.onend = () => {
-        setIsListening(false)
-      }
-      
-      setSpeechRecognition(recognition)
-    }
-  }, [lastQuestionTime])
+  // Stop capture if this view unmounts mid-session
+  useEffect(() => () => void stopAudioRef.current?.().catch(() => {}), [])
 
   const handleMouseEnter = () => {
     setIsTooltipVisible(true)
@@ -139,52 +80,60 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     setIsTooltipVisible(false)
   }
 
-  const handleRecordClick = async () => {
-    if (isListening) {
-      // Stop listening
-      if (speechRecognition) {
-        speechRecognition.stop()
+  // Each finished utterance gets a placeholder line right away (keeps order), filled in when its text arrives
+  const handleSpeech = async (role: Role, wavBase64: string) => {
+    const id = nextLineId.current++
+    setTranscript(prev => [...prev, { id, role }])
+    try {
+      const { text } = await window.electronAPI.transcribeAudio(wavBase64)
+      if (!text) {
+        setTranscript(prev => prev.filter(line => line.id !== id))
+        return
       }
+      setTranscript(prev => prev.map(line => line.id === id ? { ...line, text } : line))
+
+      const questions = detectQuestions(text)
+      if (questions.length > 0 && Date.now() - lastQuestionTime.current > 2000) { // Prevent spam
+        lastQuestionTime.current = Date.now()
+        questions.forEach(question => addLiveInsight(question))
+        handleInstantResponse(questions.join(" "))
+      }
+    } catch (error) {
+      console.error('Transcription failed:', error)
+      setTranscript(prev => prev.filter(line => line.id !== id))
+    }
+  }
+  const handleSpeechRef = useRef(handleSpeech)
+  handleSpeechRef.current = handleSpeech
+
+  const startListening = () => {
+    const session = startLiveAudio((role, wav) => handleSpeechRef.current(role, wav))
+    const stop = () => session.then(stopAudio => stopAudio())
+    stopAudioRef.current = stop
+    setIsListening(true)
+    setShowAskInterface(true) // the transcript lives in the panel
+    setCurrentTranscription("")
+    session.catch(error => {
+      console.error('Failed to start listening:', error)
+      if (stopAudioRef.current !== stop) return
+      stopAudioRef.current = null
       setIsListening(false)
-      setShowLiveInsights(false)
-    } else {
-      // Start listening with Web Speech API for instant transcription
-      if (speechRecognition) {
-        try {
-          speechRecognition.start()
-          setShowLiveInsights(true)
-          setCurrentTranscription("Listening... Speak naturally and I'll detect your questions instantly!")
-        } catch (error) {
-          console.error('Failed to start speech recognition:', error)
-          setCurrentTranscription("Speech recognition not available. Please check your microphone permissions.")
-        }
-      } else {
-        setCurrentTranscription("Speech recognition not supported in this browser.")
-      }
-    }
+      setCurrentTranscription("Couldn't start listening. Please check your microphone permissions.")
+    })
   }
 
-  const handlePauseResume = () => {
-    if (isListening) {
-      if (speechRecognition) {
-        speechRecognition.stop()
-        setIsListening(false)
-      }
-    } else {
-      if (speechRecognition) {
-        speechRecognition.start()
-        setIsListening(true)
-      }
-    }
-  }
-
-  const handleDone = () => {
-    if (speechRecognition) {
-      speechRecognition.stop()
-    }
+  const stopListening = () => {
+    stopAudioRef.current?.().catch(() => {}) // start failures are reported by startListening
+    stopAudioRef.current = null
     setIsListening(false)
-    setShowLiveInsights(false)
-    setCurrentTranscription("Listening stopped. Your questions and answers are saved above.")
+  }
+
+  const handleRecordClick = () => {
+    if (isListening) {
+      stopListening()
+    } else {
+      startListening()
+    }
   }
 
   const handleAskClick = () => {
@@ -244,7 +193,7 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && e.ctrlKey) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       handleSubmitQuestion()
             }
           }
@@ -360,27 +309,9 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     setLiveInsights(prev => [insight, ...prev.slice(0, 9)]) // Keep last 10 insights
   }
 
-  const handleInsightClick = async (insight: LiveInsight) => {
-    setSelectedInsight(insight)
-    setInsightAnswer("")
-    
-    try {
-      const result = await window.electronAPI.analyzeTextQuestion(insight.question, isSmartMode)
-      setInsightAnswer(result.text)
-      
-      // Mark as answered
-      setLiveInsights(prev => 
-        prev.map(i => i.id === insight.id ? { ...i, isAnswered: true } : i)
-      )
-    } catch (error) {
-      setInsightAnswer("Sorry, I couldn't process this question right now.")
-    }
-  }
-
-  const clearLiveInsights = () => {
-    setLiveInsights([])
-    setSelectedInsight(null)
-    setInsightAnswer("")
+  const handleInsightClick = (insight: LiveInsight) => {
+    setLiveInsights(prev => prev.map(i => i.id === insight.id ? { ...i, isAnswered: true } : i))
+    handleInstantResponse(insight.question)
   }
 
   const handleInstantResponse = async (question: string) => {
@@ -405,337 +336,175 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     }
   }
 
+  // Keep the newest line in view
+  const scrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })
+  }, [transcript, conversations])
+
+  const hasContent = transcript.length > 0 || conversations.length > 0 || liveInsights.length > 0
+  const roundBtn = "pointer-events-auto flex size-8 shrink-0 items-center justify-center rounded-full cl-grey cl-hover text-white"
+
   return (
-    <div className="w-full max-w-4xl mx-auto relative">
-      {/* Main Command Bar */}
-      <div className="backdrop-blur-md bg-black/40 border border-white/10 rounded-2xl p-3 flex items-center justify-center gap-3">
-        
-        {/* Listen Button */}
-        <button
-          onClick={handleRecordClick}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-            isListening
-              ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg'
-              : 'bg-blue-500 hover:bg-blue-600 text-white shadow-lg'
-          }`}
-        >
-          {isListening ? (
-            <>
-              <div className="w-3 h-3 bg-white rounded-full animate-pulse"></div>
-              Stop Listening
-            </>
-          ) : (
-            <>
-              <div className="w-3 h-3 bg-white rounded-full"></div>
-              Start Listening
-            </>
-          )}
-        </button>
-
-        {/* Pause/Resume Button */}
-        {isListening && (
-          <button
-            onClick={handlePauseResume}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-600 text-white font-medium transition-all duration-200"
-          >
-            <span className="text-sm">⏸️</span>
-            Pause
-            </button>
-        )}
-
-        {/* Done Button */}
-        {isListening && (
-          <button
-            onClick={handleDone}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white font-medium transition-all duration-200"
-          >
-            <span className="text-sm">✅</span>
-            Done
-            </button>
-        )}
-
-        {/* Ask Button */}
-        <button 
-          className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 ${
-            showAskInterface 
-              ? 'bg-blue-600/70 text-white shadow-lg shadow-blue-600/25' 
-              : 'bg-gray-700/50 text-white hover:bg-gray-600/50'
-          }`}
-          onClick={handleAskClick}
-        >
-          <span>💬</span>
-          <span>Ask</span>
-          <div className="flex items-center gap-1">
-            <kbd className="bg-white/10 text-xs px-1.5 py-0.5 rounded">Ctrl</kbd>
-            <kbd className="bg-white/10 text-xs px-1.5 py-0.5 rounded">↵</kbd>
-          </div>
-            </button>
-
-        {/* Show/Hide Button */}
-        <button className="flex items-center gap-2 px-4 py-2 bg-gray-700/50 hover:bg-gray-600/50 text-white rounded-full text-sm font-medium transition-colors">
-          <span>Show/Hide</span>
-          <div className="flex items-center gap-1">
-            <kbd className="bg-white/10 text-xs px-1.5 py-0.5 rounded">Ctrl</kbd>
-            <kbd className="bg-white/10 text-xs px-1.5 py-0.5 rounded">B</kbd>
-          </div>
-        </button>
-
-        {/* Info Button */}
-        <button
-          className="p-2 bg-gray-700/50 hover:bg-gray-600/50 text-white rounded-full transition-colors"
+    <div className="w-full max-w-[540px] mx-auto relative">
+      {/* Control pill */}
+      <div className="mx-auto flex h-[50px] w-fit items-center gap-1.5 rounded-full cl-glass pl-3 pr-[9px] select-none">
+        <div
+          className="mr-1.5 size-[26px] shrink-0 rounded-full"
+          style={{ background: "conic-gradient(from 270deg at 50% 50%, #3e42be 0deg, #2cb8ff 128deg, #9b4dfa 202deg, #3e42be 359deg)" }}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
-        >
-          <IoInformationCircleOutline className="w-4 h-4" />
-        </button>
+        />
 
-        {/* Clear/Reset Button */}
-        {(conversations.length > 0) && (
-          <button
-            className="p-2 bg-orange-500/20 hover:bg-orange-500/30 text-orange-400 hover:text-orange-300 rounded-full transition-colors"
-            title="Clear Conversation"
-            onClick={handleClearConversations}
-          >
-            <IoClose className="w-4 h-4" />
-          </button>
-        )}
-
-        {/* Quit Button */}
         <button
-          className="p-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 rounded-full transition-colors"
-          title="Quit App"
-          onClick={() => window.electronAPI.quitApp()}
+          onClick={handleAskClick}
+          className="flex h-8 w-[66px] shrink-0 items-center justify-center gap-1 rounded-full cl-blue cl-hover text-xs font-semibold text-white"
         >
-          <IoLogOutOutline className="w-4 h-4" />
+          {showAskInterface ? <IoChevronUp className="size-3.5" /> : <IoChevronDown className="size-3.5" />}
+          {showAskInterface ? "Hide" : "Ask"}
         </button>
-        </div>
 
-      {/* Ask Interface */}
-      {showAskInterface && (
-        <div className="mt-3 backdrop-blur-md bg-gray-900/95 border border-gray-700/50 rounded-xl shadow-xl transition-all duration-300 ease-in-out max-w-2xl mx-auto">
-          {/* Header */}
-          <div className="flex items-center justify-between p-3 border-b border-gray-700/50">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 bg-blue-600/20 rounded-full flex items-center justify-center">
-                <span className="text-blue-400 text-xs">🤖</span>
-              </div>
-              <span className="text-white font-medium text-sm">AI Response</span>
-            </div>
-          <div className="flex items-center gap-2">
-              <button
-                onClick={toggleSmartMode}
-                className={`flex items-center gap-1 px-2 py-1 rounded-full border transition-all duration-200 text-xs ${
-                  isSmartMode 
-                    ? 'bg-blue-600/20 border-blue-500/30 text-blue-300' 
-                    : 'bg-gray-600/20 border-gray-500/30 text-gray-300'
-                }`}
-              >
-                <span>{isSmartMode ? '⚡' : '💬'}</span>
-                <span className="font-medium">{isSmartMode ? 'Smart' : 'Normal'}</span>
-              </button>
-              <button
-                onClick={handleAskClick}
-                className="p-1 text-gray-400 hover:text-white transition-colors"
-                title="Close Ask Interface"
-              >
-                <IoClose className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
-
-          {/* Content Area */}
-          <div className="max-h-64 overflow-y-auto p-3">
-            {/* Conversation History */}
-            {conversations.length > 0 ? (
-              <div className="space-y-3">
-                {conversations.map((conv, index) => (
-                  <div key={conv.timestamp} className="space-y-2">
-                    {/* Question */}
-                    <div className="flex items-start gap-2">
-                      <div className="w-4 h-4 bg-blue-600/20 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <span className="text-blue-400 text-xs">💬</span>
-                      </div>
-                      <div className="flex-1">
-                        <div className="bg-gray-800/50 rounded-lg p-2 border border-gray-700/30">
-                          <div className="text-gray-300 text-xs">{conv.question}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Answer */}
-                    <div className="flex items-start gap-2">
-                      <div className="w-4 h-4 bg-green-600/20 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <span className="text-green-400 text-xs">🤖</span>
-                      </div>
-                      <div className="flex-1">
-                        <div className="bg-gray-800/30 rounded-lg p-2 border border-gray-700/20">
-                          <div className="text-white text-xs">
-                            <Markdown>{conv.answer}</Markdown>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          {/* Input Area */}
-          <div className="p-3 border-t border-gray-700/50 bg-gray-900/50">
-        <div className="flex items-center gap-2">
-              <div className="flex-1 relative">
-                <input
-                  ref={questionInputRef}
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  onKeyDown={handleKeyPress}
-                  placeholder={isSmartMode 
-                    ? "Ask about your screen or any coding question..." 
-                    : "Ask anything..."
-                  }
-                  className="w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500/50 focus:bg-gray-800/70 transition-all duration-200 text-sm"
-                  disabled={isSubmitting}
-                />
-              </div>
-          <button
-                onClick={handleSubmitQuestion}
-                disabled={!question.trim() || isSubmitting}
-                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 flex items-center gap-1 text-sm ${
-                  question.trim() && !isSubmitting
-                    ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-600/25'
-                    : 'bg-gray-700/50 text-gray-400 cursor-not-allowed'
-                }`}
-          >
-                {isSubmitting ? (
-                  <>
-                    <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                    <span>Analyzing...</span>
-                  </>
-            ) : (
-                  <>
-                    <IoSend className="w-3 h-3" />
-                    <span>Submit</span>
-                  </>
-            )}
-          </button>
-        </div>
-
-            {/* Clear conversations button */}
-            {conversations.length > 0 && (
-              <div className="flex justify-end mt-2">
-                <button
-                  onClick={handleClearConversations}
-                  className="text-gray-400 hover:text-white text-xs transition-colors flex items-center gap-1"
+        <button
+          onClick={handleRecordClick}
+          aria-label={isListening ? "Stop listening" : "Start listening"}
+          title={isListening ? "Stop listening" : "Start listening"}
+          className={roundBtn}
         >
-                  <IoClose className="w-2 h-2" />
-                  Clear conversation
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+          {isListening ? <IoStop className="size-3.5 text-red-400" /> : <IoPlay className="size-4 ml-0.5" />}
+        </button>
 
-      {/* Live Insights Panel */}
-      {showLiveInsights && (
-        <div className="mt-4 p-4 bg-gray-800/50 backdrop-blur-md border border-white/10 rounded-xl">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-white font-semibold flex items-center gap-2">
-              <span className="text-blue-400">🔴</span>
-              Live Insights
-              {isListening && (
-                <span className="text-xs bg-green-500 text-white px-2 py-1 rounded-full animate-pulse">
-                  LIVE
-                </span>
-              )}
-            </h3>
-            <button
-              onClick={clearLiveInsights}
-              className="text-gray-400 hover:text-white text-sm"
+        <button
+          onClick={() => window.electronAPI.quitApp()}
+          aria-label="Quit"
+          title="Quit"
+          className={roundBtn}
+        >
+          <IoLogOutOutline className="size-4 text-white/70" />
+        </button>
+      </div>
+
+      {/* Chat panel */}
+      {showAskInterface && (
+        <div className="mt-2 overflow-hidden rounded-[22px] cl-glass text-[13px] text-white">
+          {(hasContent || isListening || currentTranscription) && (
+            <div
+              ref={scrollRef}
+              className="max-h-72 space-y-2.5 overflow-y-auto px-3 pt-3 pb-1"
             >
-              Clear
-            </button>
-          </div>
-          
-          {/* Real-time Transcription */}
-          <div className="mb-4">
-            <div className="text-sm text-gray-300 mb-2">Real-time Transcription:</div>
-            <div className="bg-gray-900/50 p-3 rounded-lg text-white text-sm min-h-[60px]">
-              {currentTranscription || "Waiting for speech..."}
-              {interimTranscript && (
-                <span className="text-gray-400 italic">
-                  {interimTranscript}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Detected Questions */}
-          <div>
-            <div className="text-sm text-gray-300 mb-2">Detected Questions ({liveInsights.length}):</div>
-            <div className="space-y-2 max-h-40 overflow-y-auto">
-              {liveInsights.length === 0 ? (
-                <div className="text-gray-500 text-sm italic">No questions detected yet...</div>
-              ) : (
-                liveInsights.map((insight) => (
+              {/* Live transcript: you right (blue), them left (grey) */}
+              {transcript.map(line => (
+                <div key={line.id} className={`flex ${line.role === "me" ? "justify-end" : "justify-start"}`}>
                   <div
-                    key={insight.id}
-                    onClick={() => handleInsightClick(insight)}
-                    className={`p-3 rounded-lg cursor-pointer transition-all duration-200 ${
-                      insight.isAnswered
-                        ? 'bg-green-500/20 border border-green-500/30'
-                        : 'bg-blue-500/20 border border-blue-500/30 hover:bg-blue-500/30'
+                    className={`max-w-[70%] whitespace-pre-wrap break-words px-3 py-2 ${
+                      line.role === "me" ? "cl-blue rounded-[11px] rounded-br-[4px]" : "cl-grey rounded-[11px] rounded-bl-[4px]"
                     }`}
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="text-white text-sm font-medium">{insight.question}</div>
-                        <div className="text-xs text-gray-400 mt-1">
-                          {insight.category} • {new Date(insight.timestamp).toLocaleTimeString()}
-                        </div>
-                      </div>
-                      <div className="text-xs text-gray-400">
-                        {insight.isAnswered ? '✅ Answered' : '⏳ Processing...'}
-                      </div>
+                    {line.text ?? <span className="text-white/50">…</span>}
+                  </div>
+                </div>
+              ))}
+              {isListening && (
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                  <span className="size-1.5 animate-pulse rounded-full bg-red-400" />
+                  {transcript.length === 0 ? "Listening to your mic and system audio…" : "Listening…"}
+                </div>
+              )}
+              {!isListening && currentTranscription && (
+                <div className="text-xs text-zinc-400">{currentTranscription}</div>
+              )}
+
+              {/* Q&A: question right (blue), answer plain */}
+              {conversations.map(conv => (
+                <div key={conv.timestamp} className="space-y-2">
+                  <div className="flex justify-end">
+                    <div className="max-w-[70%] whitespace-pre-wrap break-words px-3 py-2 cl-blue rounded-[11px] rounded-br-[4px]">
+                      {conv.question}
                     </div>
                   </div>
-                ))
+                  <div className="px-1 pb-1 text-white/90 select-text">
+                    <Markdown>{conv.answer}</Markdown>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Detected questions as quick-action chips */}
+          {liveInsights.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-1 px-2.5 pt-2 text-xs">
+              {liveInsights.slice(0, 3).map((insight, i) => (
+                <React.Fragment key={insight.id}>
+                  {i > 0 && <span className="text-zinc-500">·</span>}
+                  <button
+                    onClick={() => handleInsightClick(insight)}
+                    title={insight.question}
+                    className={`max-w-[170px] truncate rounded-full px-2 py-1.5 font-medium transition hover:bg-white/15 hover:text-white ${
+                      insight.isAnswered ? "text-zinc-500" : "text-white/80"
+                    }`}
+                  >
+                    {insight.question}
+                  </button>
+                </React.Fragment>
+              ))}
+              <button onClick={() => setLiveInsights([])} className="ml-auto p-1 text-zinc-500 hover:text-white" title="Clear questions">
+                <IoClose className="size-3" />
+              </button>
+            </div>
+          )}
+
+          {/* Input */}
+          <div className="px-2.5 pt-1.5 pb-2.5">
+            <div className="relative overflow-hidden rounded-md border-[0.5px] border-white/20 bg-white/5">
+              <input
+                ref={questionInputRef}
+                value={question}
+                onChange={e => setQuestion(e.target.value)}
+                onKeyDown={handleKeyPress}
+                placeholder="Ask about your screen or conversation…"
+                disabled={isSubmitting}
+                className="w-full bg-transparent py-2.5 pl-2.5 pr-10 text-[13px] font-medium text-white placeholder-zinc-400 focus:outline-none"
+              />
+              <button
+                onClick={handleSubmitQuestion}
+                disabled={!question.trim() || isSubmitting}
+                aria-label="Send"
+                className="absolute right-[7px] top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-full cl-blue cl-hover text-white disabled:opacity-40"
+              >
+                {isSubmitting
+                  ? <div className="size-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  : <IoArrowUp className="size-3.5" />}
+              </button>
+            </div>
+            <div className="mt-1.5 flex items-center justify-between px-0.5 text-xs text-zinc-400">
+              <button onClick={toggleSmartMode} className="transition hover:text-white">
+                {isSmartMode ? "⚡ Smart" : "💬 Normal"}
+              </button>
+              {conversations.length > 0 && (
+                <button onClick={handleClearConversations} className="transition hover:text-white">
+                  Clear
+                </button>
               )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Tooltip */}
-          {isTooltipVisible && (
-            <div
-              ref={tooltipRef}
-          className="absolute top-full left-1/2 transform -translate-x-1/2 mt-2 backdrop-blur-md bg-black/80 border border-white/10 rounded-xl p-4 text-white text-sm max-w-md z-50 shadow-xl"
-            >
-                  <div className="space-y-3">
-            <div className="text-center font-medium text-white/90 mb-3">
-              Keyboard Shortcuts
-                    </div>
-
-            <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                <span>Submit Question</span>
-                <div className="flex gap-1">
-                  <kbd className="bg-white/10 px-2 py-1 rounded text-xs">Ctrl</kbd>
-                  <kbd className="bg-white/10 px-2 py-1 rounded text-xs">↵</kbd>
-                        </div>
-                    </div>
-
-                      <div className="flex items-center justify-between">
-                <span>Toggle Visibility</span>
-                <div className="flex gap-1">
-                  <kbd className="bg-white/10 px-2 py-1 rounded text-xs">Ctrl</kbd>
-                  <kbd className="bg-white/10 px-2 py-1 rounded text-xs">B</kbd>
-                </div>
-              </div>
+      {/* Shortcuts tooltip (hover the orb) */}
+      {isTooltipVisible && (
+        <div
+          ref={tooltipRef}
+          className="absolute left-1/2 top-full z-50 mt-2 -translate-x-1/2 rounded-xl cl-glass px-4 py-3 text-xs text-white"
+        >
+          {[["Ask", "Ctrl ↵"], ["Show/Hide", "Ctrl B"]].map(([label, keys]) => (
+            <div key={label} className="flex items-center justify-between gap-6 py-0.5">
+              <span>{label}</span>
+              <span className="flex gap-1">
+                {keys.split(" ").map(k => (
+                  <kbd key={k} className="rounded border border-white/20 px-1.5 py-0.5">{k}</kbd>
+                ))}
+              </span>
             </div>
-      </div>
+          ))}
         </div>
       )}
     </div>

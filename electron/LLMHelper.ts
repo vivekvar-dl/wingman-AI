@@ -147,6 +147,13 @@ For coding questions, provide explanations, code examples, and practical insight
     }
   }
 
+  public async transcribeAudio(wavBase64: string) {
+    const audioPart = { inlineData: { data: wavBase64, mimeType: "audio/wav" } };
+    const prompt = `Transcribe this audio verbatim in its original language. Output only the transcript text. If there is no intelligible speech, output nothing.`;
+    const result = await this.model.generateContent([prompt, audioPart]);
+    return { text: result.response.text().trim() };
+  }
+
   public async analyzeImageFile(imagePath: string) {
     try {
       const imageData = await fs.promises.readFile(imagePath);

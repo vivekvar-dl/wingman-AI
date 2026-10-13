@@ -33,6 +33,10 @@ interface ElectronAPI {
   analyzeImageFile: (path: string) => Promise<void>
   analyzeTextQuestion: (question: string, isSmartMode?: boolean) => Promise<{ text: string; timestamp: number }>
   analyzeScreenWithQuestion: (imagePath: string, question: string, isSmartMode?: boolean) => Promise<{ text: string; timestamp: number }>
+  transcribeAudio: (wavBase64: string) => Promise<{ text: string }>
+  startSystemAudio: () => Promise<boolean>
+  stopSystemAudio: () => Promise<void>
+  onSystemAudio: (callback: (pcm: Uint8Array) => void) => () => void
   quitApp: () => Promise<void>
 }
 
@@ -169,5 +173,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
   analyzeTextQuestion: (question: string, isSmartMode: boolean = true) => ipcRenderer.invoke("analyze-text-question", question, isSmartMode),
   analyzeScreenWithQuestion: (imagePath: string, question: string, isSmartMode: boolean = true) => ipcRenderer.invoke("analyze-screen-with-question", imagePath, question, isSmartMode),
+  transcribeAudio: (wavBase64: string) => ipcRenderer.invoke("transcribe-audio", wavBase64),
+  startSystemAudio: () => ipcRenderer.invoke("system-audio-start"),
+  stopSystemAudio: () => ipcRenderer.invoke("system-audio-stop"),
+  onSystemAudio: (callback: (pcm: Uint8Array) => void) => {
+    const subscription = (_: any, pcm: Uint8Array) => callback(pcm)
+    ipcRenderer.on("system-audio-data", subscription)
+    return () => {
+      ipcRenderer.removeListener("system-audio-data", subscription)
+    }
+  },
   quitApp: () => ipcRenderer.invoke("quit-app")
 } as ElectronAPI)
